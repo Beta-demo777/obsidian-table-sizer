@@ -29,8 +29,16 @@ Once published, search for **Table Sizer** in *Settings → Community plugins �
 
 ### Manual installation
 
-1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](https://github.com/Beta-demo777/obsidian-table-sizer/releases).
-2. Put the three files in `<your-vault>/.obsidian/plugins/table-sizer/`.
+**From the archive (fewest steps)**
+
+1. Download `table-sizer-<version>.zip` from the [latest release](https://github.com/Beta-demo777/obsidian-table-sizer/releases).
+2. Extract it into `<your-vault>/.obsidian/plugins/`. The archive already contains a `table-sizer/` folder, so the files land where Obsidian expects them.
+3. Reload Obsidian and enable **Table Sizer** in *Settings → Community plugins*.
+
+**From the individual files**
+
+1. Download `main.js`, `manifest.json`, and `styles.css` from the latest release.
+2. Put all three directly in `<your-vault>/.obsidian/plugins/table-sizer/`. They must sit in that folder, not in a subfolder of it.
 3. Reload Obsidian and enable **Table Sizer** in *Settings → Community plugins*.
 
 ## Usage
@@ -103,7 +111,7 @@ To test locally, place the repository in `<your-vault>/.obsidian/plugins/table-s
    git tag 0.2.0 && git push origin 0.2.0
    ```
 
-4. The [release workflow](.github/workflows/release.yml) runs the type check, the tests and the build, verifies that the tag matches `manifest.json`, and attaches `main.js`, `manifest.json`, and `styles.css` to the GitHub release.
+4. The [release workflow](.github/workflows/release.yml) runs the type check, the tests and the build, verifies that the tag matches `manifest.json`, and attaches `main.js`, `manifest.json`, `styles.css` plus a `table-sizer-<version>.zip` archive to the GitHub release. The three loose files are what Obsidian and BRAT download; the archive is only a convenience for people installing by hand.
 
 ## License
 

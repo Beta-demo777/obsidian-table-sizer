@@ -47,10 +47,26 @@ jobs:
           fi
           echo "Version $MANIFEST_VERSION matches tag."
 
+      # Convenience archive for manual installs. The plugin folder is a top
+      # level entry in the zip, so extracting into `.obsidian/plugins/` drops
+      # the files exactly where Obsidian expects them.
+      - name: Package plugin folder
+        run: |
+          ARCHIVE="${PLUGIN_NAME}-${GITHUB_REF_NAME}.zip"
+          rm -rf package "${ARCHIVE}"
+          mkdir -p "package/${PLUGIN_NAME}"
+          cp main.js manifest.json styles.css "package/${PLUGIN_NAME}/"
+          (cd package && zip -r "../${ARCHIVE}" "${PLUGIN_NAME}")
+          echo "--- archive contents ---"
+          unzip -l "${ARCHIVE}"
+
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 \
             || gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
-          gh release upload "${GITHUB_REF_NAME}" main.js manifest.json styles.css --clobber
+          gh release upload "${GITHUB_REF_NAME}" \
+            main.js manifest.json styles.css \
+            "${PLUGIN_NAME}-${GITHUB_REF_NAME}.zip" \
+            --clobber
