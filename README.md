@@ -56,9 +56,24 @@ You can also run **Table Sizer: Reset table sizes for current note** from the co
 ## How it works
 
 - Resizing is applied to the rendered table through a generated `<colgroup>`, with `table-layout: fixed`.
-- Dimensions are persisted in the plugin's `data.json`, keyed as `<note path>::<table index>`.
+- Dimensions are persisted in the plugin's `data.json`, under a key scoped to the note.
 - A `MutationObserver` watches the active view so that tables keep their sizes when Obsidian re-renders them.
-- To avoid layout drift, tables are identified by their order in the note rather than by their header text — inserting a new table *above* an existing one will shift the saved sizes of the tables below it.
+
+### How a table is recognised again
+
+Tables are matched by **content**, not by position, so inserting, deleting or reordering tables in a note no longer disturbs the sizes of the others. Each rendered table gets a signature built from its header row, plus a hash of its body, and the whole note is matched in rounds:
+
+1. identical signature and body — the same table, unchanged;
+2. identical signature — the same table with an edited body;
+3. similar headers above a threshold — the same table with a renamed header;
+4. document position — last resort.
+
+Rounds 1–3 are applied to every table *before* any positional fallback, which is what makes a newly inserted table come out unmatched: the existing tables claim their records first, so the newcomer has nothing left to inherit. A table that has never been resized simply has no record.
+
+Two honest limits:
+
+- Two tables that are identical in both header and body cannot be told apart, so inserting a third identical table above them still shifts their pairing. Nothing short of writing an identifier into the Markdown can fix that, and this plugin deliberately never touches your Markdown.
+- Positional fallback is only used for records written by versions before 0.2, which carry no signature. Such records are upgraded in place the first time the note is opened with the same number of tables, so existing sizes are preserved. A record that already knows what its table looks like is never handed to a table that failed every content round — otherwise one table's dimensions could silently be applied to another.
 
 ## Related plugins
 
@@ -71,21 +86,24 @@ npm install
 npm run dev     # watch mode, rebuilds main.js on change
 npm run build   # production build
 npm run check   # type check only (tsc --noEmit)
+npm test        # scenario tests (Node's test runner, no extra framework)
 ```
+
+The tests drive the real `TableResizer` through a stubbed DOM, so they cover the matching rules and the table lifecycle without needing Obsidian running.
 
 To test locally, place the repository in `<your-vault>/.obsidian/plugins/table-sizer/` and enable the plugin. The [Hot Reload](https://github.com/pjeby/hot-reload) plugin reloads it automatically after each build.
 
 ### Releasing
 
-1. Bump `version` in `manifest.json` (SemVer `x.y.z`) and add the matching entry to `versions.json`.
+1. Bump `version` in `manifest.json` and `package.json` (SemVer `x.y.z`) and add the matching entry to `versions.json`.
 2. Commit the change.
 3. Push a tag identical to the version:
 
    ```bash
-   git tag 0.1.0 && git push origin 0.1.0
+   git tag 0.2.0 && git push origin 0.2.0
    ```
 
-4. The [release workflow](.github/workflows/release.yml) runs the type check and build, verifies that the tag matches `manifest.json`, and attaches `main.js`, `manifest.json`, and `styles.css` to the GitHub release.
+4. The [release workflow](.github/workflows/release.yml) runs the type check, the tests and the build, verifies that the tag matches `manifest.json`, and attaches `main.js`, `manifest.json`, and `styles.css` to the GitHub release.
 
 ## License
 
@@ -104,7 +122,8 @@ To test locally, place the repository in `<your-vault>/.obsidian/plugins/table-s
 ### 特性
 
 - 拖拽**列边界**调整列宽，拖拽**行边界**调整行高。
-- **表头改动不会丢尺寸** —— 尺寸以「笔记路径 + 表格位置」为键，而不是依赖表格文本。
+- **插入、删除、重排表格都不会影响其它表格的尺寸** —— 表格按内容识别，而不是按出现顺序。
+- **表头改动不会丢尺寸** —— 表头相似度匹配会兜住改名的情况。
 - **按笔记持久化**，重启后仍然生效。
 - 可配置最小列宽与最小行高。
 - 提供「重置当前笔记的表格尺寸」命令与设置面板按钮。
@@ -115,15 +134,28 @@ To test locally, place the repository in `<your-vault>/.obsidian/plugins/table-s
 2. 将鼠标移到列边界或行边界的拖拽手柄上，指针会变为缩放样式。
 3. 拖拽到目标尺寸后松开鼠标，尺寸自动保存。
 
-### 构建
+### 构建与测试
 
 ```bash
 npm install
 npm run build
+npm test      # 场景测试，使用 Node 自带测试运行器，无需额外框架
 ```
 
 将生成的 `main.js`、`manifest.json` 和 `styles.css` 放在 vault 的 `.obsidian/plugins/table-sizer/` 目录中即可加载。
 
-### 说明
+### 表格是如何被识别的
 
-表格按其在笔记中的**出现顺序**识别，而非按表头文本。因此在一篇笔记里靠前的位置插入一张新表格，会使其后表格的已保存尺寸发生错位 —— 这是为了换取「编辑表头不丢尺寸」而做的权衡。
+表格按**内容**匹配，而非按位置。每张渲染出的表格会根据表头文本生成签名，并结合正文哈希，然后对整篇笔记做多轮配对：
+
+1. 签名与正文都相同 —— 同一张表，内容未变；
+2. 签名相同 —— 同一张表，正文有改动；
+3. 表头相似度超过阈值 —— 同一张表，表头被改名；
+4. 文档位置 —— 兜底。
+
+第 1–3 轮会先对**所有**表格跑完，才轮到位置兜底。这正是「新插入的表格不会被误分配」的原因：原有表格先各自认领自己的记录，新表就没有可继承的东西。从未调整过尺寸的表格本来就没有记录。
+
+两个诚实的边界：
+
+- **表头和正文都完全相同的两张表无法区分**，因此往它们上方再插入一张一模一样的表，仍会串位。不往 Markdown 里写入标识就无法根治，而本插件刻意不改写你的笔记。
+- 位置兜底**只对 0.2 之前版本写入的、不含签名的记录生效**。这类记录会在笔记表格数量一致时首次打开就地升级，因此原有尺寸完整保留。已经知道自己长什么样的记录，绝不会被交给一张内容对不上的表 —— 否则会把一张表的尺寸静默套用到另一张上。

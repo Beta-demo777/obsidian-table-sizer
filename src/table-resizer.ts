@@ -1,12 +1,25 @@
 import { MarkdownView, type App, type EventRef } from "obsidian";
-import type { TableDimensions, TableDragSettings } from "./types";
+import {
+  buildBodyHash,
+  buildSignature,
+  canLearnIdentity,
+  matchRenderedTables,
+  type RenderedTableInfo,
+  type TableMatch
+} from "./table-matching";
+import type {
+  TableDimensions,
+  TableDragSettings,
+  TableIdentity,
+  TableStore
+} from "./types";
 
 type ResizeMode = "column" | "row";
 
 interface ResizeSession {
   mode: ResizeMode;
   table: HTMLTableElement;
-  tableKey: string;
+  recordId: number;
   index: number;
   startX: number;
   startY: number;
@@ -14,8 +27,16 @@ interface ResizeSession {
 }
 
 interface TableRecord {
+  /** Stable handle used by drag handles, independent of the storage key. */
+  id: number;
   table: HTMLTableElement;
-  tableKey: string;
+  path: string;
+  /** Assigned lazily: a table with no saved size has no key until it is dragged. */
+  tableKey: string | null;
+  /** Document position, refreshed on every render. */
+  order: number;
+  signature: string;
+  bodyHash: string;
   dimensions: TableDimensions;
   columnHandles: HTMLElement[];
   rowHandles: HTMLElement[];
@@ -23,6 +44,7 @@ interface TableRecord {
 
 export class TableResizer {
   private readonly records = new Map<HTMLTableElement, TableRecord>();
+  private readonly recordsById = new Map<number, TableRecord>();
   private readonly handles = new Set<HTMLElement>();
   private activeView: MarkdownView | null = null;
   private resizeSession: ResizeSession | null = null;
@@ -30,13 +52,12 @@ export class TableResizer {
   private observer: MutationObserver | null = null;
   private readonly workspaceEvents: EventRef[] = [];
   private disposed = false;
+  private nextRecordId = 1;
 
   constructor(
     private readonly app: App,
     private readonly settings: TableDragSettings,
-    private readonly getDimensions: (key: string) => TableDimensions | undefined,
-    private readonly setDimensions: (key: string, dimensions: TableDimensions) => void,
-    private readonly removeDimensions: (key: string) => void
+    private readonly store: TableStore
   ) {}
 
   load(): void {
@@ -100,10 +121,10 @@ export class TableResizer {
     const path = view?.file?.path;
     if (!path) return;
 
-    for (const [table, record] of this.records) {
-      if (record.tableKey.startsWith(`${path}::`)) this.removeRecord(table, record);
+    for (const [table, record] of Array.from(this.records)) {
+      if (record.path === path) this.removeRecord(table, record);
     }
-    this.removeDimensions(`${path}::`);
+    this.store.removeEntries(path);
     this.refresh();
   }
 
@@ -129,13 +150,44 @@ export class TableResizer {
     }
 
     this.clearRecords();
+    const path = view.file.path;
     const tables = (Array.from(view.contentEl.querySelectorAll("table")) as HTMLTableElement[])
       .filter((table) => {
         const rect = table.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
       });
-    tables.forEach((table, index) => this.setupTable(table, view.file?.path ?? "", index));
+
+    // Describe every table first, then match the whole note in a single pass.
+    // Matching per table would let a newly inserted table claim an existing
+    // table's record before that table had a chance to claim it.
+    const described = tables.map((table, index) => this.describeTable(table, index));
+    const entries = this.store.getEntries(path);
+    const { matches } = matchRenderedTables(described, entries);
+    const matchByIndex = new Map(matches.map((match) => [match.renderedIndex, match]));
+
+    tables.forEach((table, index) => {
+      const info = described[index];
+      if (info) this.setupTable(table, path, info, matchByIndex.get(index), described.length, entries.length);
+    });
+
+    this.store.flush();
     this.updateHandlePositions();
+  }
+
+  /**
+   * Read a table's identity from its rendered cells. Rendered text is used
+   * instead of Markdown source so syntax such as `**bold**` or escapes never
+   * reaches the signature.
+   */
+  private describeTable(table: HTMLTableElement, index: number): RenderedTableInfo {
+    const headers = Array.from(table.rows[0]?.cells ?? []).map((cell) => cell.textContent ?? "");
+    const bodyTexts: string[] = [];
+    for (let rowIndex = 1; rowIndex < table.rows.length; rowIndex++) {
+      for (const cell of Array.from(table.rows[rowIndex].cells)) {
+        bodyTexts.push(cell.textContent ?? "");
+      }
+    }
+    return { index, headers, bodyTexts };
   }
 
   private hasRelevantMutation(mutations: MutationRecord[]): boolean {
@@ -148,46 +200,66 @@ export class TableResizer {
     });
   }
 
-  private setupTable(table: HTMLTableElement, path: string, index: number): void {
+  private setupTable(
+    table: HTMLTableElement,
+    path: string,
+    info: RenderedTableInfo,
+    match: TableMatch | undefined,
+    renderedCount: number,
+    savedCount: number
+  ): void {
     const columnCount = table.rows[0]?.cells.length ?? 0;
     if (columnCount === 0 || table.rows.length === 0) return;
 
-    // Keep this key independent from table text. Headers can be added or edited
-    // while the rendered table is being rebuilt; dimensions should survive that.
-    const tableKey = `${path}::${index}`;
-    const dimensions = this.normalizeDimensions(table, this.getDimensions(tableKey));
+    const savedDimensions = match ? this.store.getDimensions(match.key) : undefined;
+    const dimensions = this.normalizeDimensions(table, savedDimensions);
     const record: TableRecord = {
+      id: this.nextRecordId++,
       table,
-      tableKey,
+      path,
+      tableKey: match?.key ?? null,
+      order: info.index,
+      signature: buildSignature(info.headers),
+      bodyHash: buildBodyHash(info.bodyTexts),
       dimensions,
       columnHandles: [],
       rowHandles: []
     };
     this.records.set(table, record);
+    this.recordsById.set(record.id, record);
     table.classList.add("table-drag-resizable");
-    table.dataset.tableDragKey = tableKey;
+    table.dataset.tableDragRecord = String(record.id);
 
-    if (this.getDimensions(tableKey)) this.applyDimensions(record);
+    if (savedDimensions) this.applyDimensions(record);
+
+    // Teach records that predate signatures what their table looks like, but
+    // only when the match is confident enough to be worth remembering.
+    if (match && canLearnIdentity(match, renderedCount, savedCount)) {
+      const identity: TableIdentity = {
+        signature: record.signature,
+        bodyHash: record.bodyHash,
+        order: info.index
+      };
+      this.store.applyIdentity(match.key, identity);
+    }
 
     if (this.settings.enableColumnResize) {
       for (let column = 0; column < columnCount; column++) {
-        const handle = this.createHandle("column", column, tableKey);
-        record.columnHandles.push(handle);
+        record.columnHandles.push(this.createHandle("column", column, record.id));
       }
     }
     if (this.settings.enableRowResize) {
       for (let row = 0; row < table.rows.length; row++) {
-        const handle = this.createHandle("row", row, tableKey);
-        record.rowHandles.push(handle);
+        record.rowHandles.push(this.createHandle("row", row, record.id));
       }
     }
   }
 
-  private createHandle(mode: ResizeMode, index: number, tableKey: string): HTMLElement {
+  private createHandle(mode: ResizeMode, index: number, recordId: number): HTMLElement {
     const handle = document.body.createDiv({ cls: ["table-drag-handle", `table-drag-handle--${mode}`] });
     handle.dataset.tableDragMode = mode;
     handle.dataset.tableDragIndex = String(index);
-    handle.dataset.tableDragKey = tableKey;
+    handle.dataset.tableDragRecord = String(recordId);
     handle.setAttribute("aria-label", mode === "column" ? "调整表格列宽" : "调整表格行高");
     this.handles.add(handle);
     return handle;
@@ -199,10 +271,16 @@ export class TableResizer {
 
     const mode = target.dataset.tableDragMode;
     const index = Number(target.dataset.tableDragIndex);
-    const key = target.dataset.tableDragKey;
-    if ((mode !== "column" && mode !== "row") || !Number.isInteger(index) || !key) return;
+    const recordId = Number(target.dataset.tableDragRecord);
+    if (
+      (mode !== "column" && mode !== "row") ||
+      !Number.isInteger(index) ||
+      !Number.isInteger(recordId)
+    ) {
+      return;
+    }
 
-    const record = Array.from(this.records.values()).find((item) => item.tableKey === key);
+    const record = this.recordsById.get(recordId);
     if (!record) return;
 
     event.preventDefault();
@@ -210,7 +288,7 @@ export class TableResizer {
     this.resizeSession = {
       mode,
       table: record.table,
-      tableKey: key,
+      recordId,
       index,
       startX: event.clientX,
       startY: event.clientY,
@@ -256,10 +334,19 @@ export class TableResizer {
     const session = this.resizeSession;
     if (!session) return;
 
-    const record = this.records.get(session.table);
-    if (record) this.setDimensions(session.tableKey, record.dimensions);
+    const record = this.recordsById.get(session.recordId);
+    if (record) this.persistRecord(record);
     this.clearResizeState();
   };
+
+  /** Store the size under the record's key, allocating one for a new table. */
+  private persistRecord(record: TableRecord): void {
+    record.tableKey = this.store.saveDimensions(record.tableKey, record.path, record.dimensions, {
+      signature: record.signature,
+      bodyHash: record.bodyHash,
+      order: record.order
+    });
+  }
 
   private clearResizeState(): void {
     this.resizeSession = null;
@@ -353,7 +440,7 @@ export class TableResizer {
     record.columnHandles.forEach((handle) => { this.handles.delete(handle); handle.remove(); });
     record.rowHandles.forEach((handle) => { this.handles.delete(handle); handle.remove(); });
     table.classList.remove("table-drag-resizable", "table-drag-managed");
-    delete table.dataset.tableDragKey;
+    delete table.dataset.tableDragRecord;
     const colgroup = Array.from(table.children).find((child) =>
       child instanceof HTMLTableColElement && child.dataset.tableDragColgroup === "true"
     );
@@ -365,5 +452,6 @@ export class TableResizer {
       Array.from(row.cells).forEach((cell) => cell.style.removeProperty("height"));
     });
     this.records.delete(table);
+    this.recordsById.delete(record.id);
   }
 }

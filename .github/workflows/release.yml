@@ -30,6 +30,9 @@ jobs:
       - name: Type check
         run: npm run check
 
+      - name: Test
+        run: npm test
+
       - name: Build plugin
         run: npm run build
 

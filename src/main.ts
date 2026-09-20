@@ -1,12 +1,35 @@
 import { MarkdownView, Plugin } from "obsidian";
 import { TableDragSettingTab } from "./settings-tab";
 import { TableResizer } from "./table-resizer";
-import { DEFAULT_DATA, DEFAULT_SETTINGS, type TableDimensions, type TableDragData, type TableDragSettings } from "./types";
+import {
+  DEFAULT_DATA,
+  DEFAULT_SETTINGS,
+  type SavedTableInfo,
+  type StoredTable,
+  type TableDimensions,
+  type TableDragData,
+  type TableDragSettings,
+  type TableIdentity,
+  type TableStore
+} from "./types";
+
+/**
+ * Positional records written before signatures existed end in a number, so the
+ * key itself tells us where the table used to be. Records without a numeric
+ * suffix sort last.
+ */
+function legacyOrder(key: string): number {
+  const separator = key.lastIndexOf("::");
+  const suffix = separator < 0 ? key : key.slice(separator + 2);
+  return /^\d+$/.test(suffix) ? Number(suffix) : Number.MAX_SAFE_INTEGER;
+}
 
 export default class TableDragPlugin extends Plugin {
   settings: TableDragSettings = { ...DEFAULT_SETTINGS };
   data: TableDragData = { version: DEFAULT_DATA.version, tables: {} };
   private resizer: TableResizer | null = null;
+  /** Identity changes are coalesced so a re-render writes at most once. */
+  private identityDirty = false;
 
   async onload(): Promise<void> {
     const saved = await this.loadData() as Partial<TableDragData & TableDragSettings> | null;
@@ -20,13 +43,7 @@ export default class TableDragPlugin extends Plugin {
       tables
     };
 
-    this.resizer = new TableResizer(
-      this.app,
-      this.settings,
-      (key) => this.getDimensions(key),
-      (key, dimensions) => this.setDimensions(key, dimensions),
-      (prefix) => this.removeDimensions(prefix)
-    );
+    this.resizer = new TableResizer(this.app, this.settings, this.createStore());
     this.resizer.load();
     this.addSettingTab(new TableDragSettingTab(this.app, this));
 
@@ -55,22 +72,97 @@ export default class TableDragPlugin extends Plugin {
     this.resizer?.refresh();
   }
 
+  /** Delegated: the resizer clears both the live handles and the records. */
   async resetCurrentNote(): Promise<void> {
-    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    const path = view?.file?.path;
-    if (!path) return;
-    for (const key of Object.keys(this.data.tables)) {
-      if (key.startsWith(`${path}::`)) delete this.data.tables[key];
-    }
-    await this.saveSettings();
     this.resizer?.resetCurrentNote();
   }
 
-  private getDimensions(key: string): TableDimensions | undefined {
-    return this.data.tables[key];
+  private createStore(): TableStore {
+    return {
+      getEntries: (path) => this.getEntries(path),
+      getDimensions: (key) => this.data.tables[key],
+      applyIdentity: (key, meta) => this.applyIdentity(key, meta),
+      saveDimensions: (key, path, dimensions, meta) =>
+        this.saveDimensions(key, path, dimensions, meta),
+      removeEntries: (path) => this.removeEntries(path),
+      flush: () => void this.flushIdentity()
+    };
   }
 
-  private migrateTableKeys(tables: Record<string, TableDimensions>): Record<string, TableDimensions> {
+  private getEntries(path: string): SavedTableInfo[] {
+    const prefix = `${path}::`;
+    const entries: SavedTableInfo[] = [];
+    for (const [key, record] of Object.entries(this.data.tables)) {
+      if (!key.startsWith(prefix)) continue;
+      entries.push({
+        key,
+        signature: record.signature,
+        bodyHash: record.bodyHash,
+        order: record.order ?? legacyOrder(key)
+      });
+    }
+    return entries;
+  }
+
+  private applyIdentity(key: string, meta: TableIdentity): void {
+    const record = this.data.tables[key];
+    if (!record) return;
+    if (
+      record.signature === meta.signature &&
+      record.bodyHash === meta.bodyHash &&
+      record.order === meta.order
+    ) {
+      return;
+    }
+    record.signature = meta.signature;
+    record.bodyHash = meta.bodyHash;
+    record.order = meta.order;
+    this.identityDirty = true;
+  }
+
+  private saveDimensions(
+    key: string | null,
+    path: string,
+    dimensions: TableDimensions,
+    meta: TableIdentity
+  ): string {
+    const target = key && this.data.tables[key] ? key : this.allocateKey(path);
+    this.data.tables[target] = {
+      columns: dimensions.columns.map((width) => Math.round(width)),
+      rows: dimensions.rows.map((height) => Math.round(height)),
+      signature: meta.signature,
+      bodyHash: meta.bodyHash,
+      order: meta.order
+    };
+    // The record now holds everything, so there is nothing left to coalesce.
+    this.identityDirty = false;
+    void this.saveSettings();
+    return target;
+  }
+
+  /** Keys are opaque handles; only uniqueness within the note matters, because
+   *  identity is decided by content matching rather than by the key. */
+  private allocateKey(path: string): string {
+    const prefix = `${path}::`;
+    let slot = 0;
+    while (Object.prototype.hasOwnProperty.call(this.data.tables, `${prefix}${slot}`)) slot++;
+    return `${prefix}${slot}`;
+  }
+
+  private removeEntries(path: string): void {
+    for (const key of Object.keys(this.data.tables)) {
+      if (key.startsWith(`${path}::`)) delete this.data.tables[key];
+    }
+    void this.saveSettings();
+  }
+
+  private async flushIdentity(): Promise<void> {
+    if (!this.identityDirty) return;
+    this.identityDirty = false;
+    await this.saveSettings();
+  }
+
+  private migrateTableKeys(tables: Record<string, StoredTable>): Record<string, StoredTable> {
     const migrated = { ...tables };
     for (const key of Object.keys(tables)) {
       const separator = key.lastIndexOf("::");
@@ -87,20 +179,5 @@ export default class TableDragPlugin extends Plugin {
       delete migrated[key];
     }
     return migrated;
-  }
-
-  private setDimensions(key: string, dimensions: TableDimensions): void {
-    this.data.tables[key] = {
-      columns: dimensions.columns.map((width) => Math.round(width)),
-      rows: dimensions.rows.map((height) => Math.round(height))
-    };
-    void this.saveSettings();
-  }
-
-  private removeDimensions(prefix: string): void {
-    for (const key of Object.keys(this.data.tables)) {
-      if (key.startsWith(prefix)) delete this.data.tables[key];
-    }
-    void this.saveSettings();
   }
 }

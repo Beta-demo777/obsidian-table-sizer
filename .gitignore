@@ -9,6 +9,9 @@ workspace-mobile.json
 main.js
 *.map
 
+# ---- 测试打包输出 ----
+test-out/
+
 # ---- 依赖 ----
 node_modules/
 package-lock.json.bak
