@@ -1,0 +1,68 @@
+.table-drag-handle {
+  position: fixed;
+  z-index: var(--layer-popover, 1000);
+  display: block;
+  box-sizing: border-box;
+  opacity: 0;
+  background-color: transparent;
+  transition: opacity 120ms ease;
+  pointer-events: auto;
+}
+
+.table-drag-handle.is-dragging {
+  opacity: 1;
+}
+
+.table-drag-handle--column {
+  width: 9px;
+  min-width: 9px;
+  margin-left: -4.5px;
+  cursor: col-resize;
+}
+
+.table-drag-handle--row {
+  height: 9px;
+  min-height: 9px;
+  margin-top: -4.5px;
+  cursor: row-resize;
+}
+
+.table-drag-handle::after {
+  position: absolute;
+  display: block;
+  content: "";
+  background-color: var(--color-accent);
+}
+
+.table-drag-handle--column::after {
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 1px;
+}
+
+.table-drag-handle--row::after {
+  top: 4px;
+  right: 0;
+  left: 0;
+  height: 1px;
+}
+
+body.table-drag-is-resizing,
+body.table-drag-is-resizing * {
+  user-select: none !important;
+}
+
+body.table-drag-is-resizing.table-drag-column,
+body.table-drag-is-resizing.table-drag-column * {
+  cursor: col-resize !important;
+}
+
+body.table-drag-is-resizing.table-drag-row,
+body.table-drag-is-resizing.table-drag-row * {
+  cursor: row-resize !important;
+}
+
+table.table-drag-managed {
+  overflow: visible;
+}

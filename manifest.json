@@ -1,0 +1,10 @@
+{
+  "id": "table-sizer",
+  "name": "Table Sizer",
+  "version": "0.1.0",
+  "minAppVersion": "1.6.0",
+  "description": "Drag Markdown table borders to resize columns and rows.",
+  "author": "Beta777",
+  "authorUrl": "https://github.com/Beta-demo777",
+  "isDesktopOnly": false
+}

@@ -1,0 +1,16 @@
+{
+  "name": "table-sizer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node esbuild.config.mjs --watch",
+    "build": "node esbuild.config.mjs --production",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.2",
+    "obsidian": "1.12.3",
+    "typescript": "^5.8.0"
+  }
+}
