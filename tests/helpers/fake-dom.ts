@@ -5,8 +5,6 @@
  */
 import type { App } from "obsidian";
 
-import type { SavedTableInfo, TableDimensions, TableIdentity, TableStore } from "../../src/types";
-
 export interface Rect {
   width: number;
   height: number;
@@ -16,8 +14,9 @@ export interface Rect {
   bottom: number;
 }
 
-function rect(width: number, height: number): Rect {
-  return { width, height, top: 0, left: 0, right: width, bottom: height };
+/** A rect placed in document coordinates, so viewport culling can be tested. */
+function rectAt(left: number, top: number, width: number, height: number): Rect {
+  return { width, height, top, left, right: left + width, bottom: top + height };
 }
 
 function createStyle(): Record<string, unknown> {
@@ -95,29 +94,31 @@ class FakeCell extends FakeElement {
   constructor(
     public textContent: string,
     private readonly cellWidth: number,
-    private readonly cellHeight: number
+    private readonly cellHeight: number,
+    private readonly cellLeft: number,
+    private readonly cellTop: number
   ) {
     super();
   }
 
   getBoundingClientRect(): Rect {
-    return rect(this.cellWidth, this.cellHeight);
+    return rectAt(this.cellLeft, this.cellTop, this.cellWidth, this.cellHeight);
   }
 }
 
 class FakeRow extends FakeElement {
   constructor(
     public cells: FakeCell[],
-    private readonly rowHeight: number
+    private readonly rowHeight: number,
+    private readonly rowTop: number
   ) {
     super();
   }
 
   getBoundingClientRect(): Rect {
-    return rect(
-      this.cells.reduce((total, cell) => total + cell.getBoundingClientRect().width, 0),
-      this.rowHeight
-    );
+    const width = this.cells.reduce((total, cell) => total + cell.getBoundingClientRect().width, 0);
+    const left = this.cells[0]?.getBoundingClientRect().left ?? 0;
+    return rectAt(left, this.rowTop, width, this.rowHeight);
   }
 }
 
@@ -127,13 +128,15 @@ export class FakeTable extends FakeElement {
   constructor(
     public rows: FakeRow[],
     private readonly tableWidth = 300,
-    private readonly tableHeight = 120
+    private readonly tableHeight = 120,
+    private readonly tableLeft = 0,
+    private readonly tableTop = 0
   ) {
     super();
   }
 
   getBoundingClientRect(): Rect {
-    return rect(this.tableWidth, this.tableHeight);
+    return rectAt(this.tableLeft, this.tableTop, this.tableWidth, this.tableHeight);
   }
 
   insertBefore(node: FakeElement, reference: FakeElement | null): FakeElement {
@@ -152,16 +155,41 @@ export class FakeTable extends FakeElement {
   }
 }
 
-/** Build a table the way Obsidian renders one: a header row plus body rows. */
-export function makeTable(headers: string[], body: string[][] = [], width = 300): FakeTable {
-  const headerRow = new FakeRow(
-    headers.map((header) => new FakeCell(header, 100, 30)),
-    30
-  );
-  const bodyRows = body.map(
-    (cells) => new FakeRow(cells.map((cell) => new FakeCell(cell, 100, 30)), 30)
-  );
-  return new FakeTable([headerRow, ...bodyRows], width, (1 + body.length) * 30);
+export interface TableOptions {
+  /** Document offset of the table, used to exercise viewport culling. */
+  top?: number;
+  left?: number;
+  cellWidth?: number;
+  rowHeight?: number;
+}
+
+/**
+ * Build a table the way Obsidian renders one: a header row plus body rows.
+ * Cells keep their own document coordinates so the resizer's viewport logic
+ * sees a realistic layout instead of everything stacked at the origin.
+ */
+export function makeTable(
+  headers: string[],
+  body: string[][] = [],
+  options: TableOptions = {}
+): FakeTable {
+  const cellWidth = options.cellWidth ?? 100;
+  const rowHeight = options.rowHeight ?? 30;
+  const left = options.left ?? 0;
+  const top = options.top ?? 0;
+
+  const buildRow = (texts: string[], rowIndex: number): FakeRow => {
+    const rowTop = top + rowIndex * rowHeight;
+    const cells = texts.map(
+      (text, cellIndex) =>
+        new FakeCell(text, cellWidth, rowHeight, left + cellIndex * cellWidth, rowTop)
+    );
+    return new FakeRow(cells, rowHeight, rowTop);
+  };
+
+  const rows = [buildRow(headers, 0), ...body.map((cells, i) => buildRow(cells, i + 1))];
+  const width = cellWidth * Math.max(headers.length, 1);
+  return new FakeTable(rows, width, rows.length * rowHeight, left, top);
 }
 
 /** The column widths the resizer applied, or null when it applied none. */
@@ -207,22 +235,42 @@ export const fakeDocument = {
   }
 };
 
+const windowListeners = new Map<string, Set<(event: unknown) => void>>();
+
+/** Viewport is a realistic size so culling behaves as it does in the app. */
+export const fakeWindow = {
+  innerHeight: 900,
+  innerWidth: 1200,
+  requestAnimationFrame(callback: () => void): number {
+    frameQueue.push(callback);
+    return frameQueue.length;
+  },
+  cancelAnimationFrame(id: number): void {
+    if (id > 0) frameQueue[id - 1] = null;
+  },
+  addEventListener(type: string, listener: (event: unknown) => void): void {
+    const set = windowListeners.get(type) ?? new Set();
+    set.add(listener);
+    windowListeners.set(type, set);
+  },
+  removeEventListener(type: string, listener: (event: unknown) => void): void {
+    windowListeners.get(type)?.delete(listener);
+  }
+};
+
+/** Fire a window event (e.g. `scroll`) and report how many listeners ran. */
+export function dispatchWindowEvent(type: string): number {
+  const listeners = [...(windowListeners.get(type) ?? [])];
+  for (const listener of listeners) listener({ type });
+  return listeners.length;
+}
+
 export function installFakeDom(): void {
   const globals = globalThis as unknown as Record<string, unknown>;
   globals.HTMLElement = FakeElement;
   globals.HTMLTableColElement = FakeColElement;
   globals.document = fakeDocument;
-  globals.window = {
-    requestAnimationFrame(callback: () => void): number {
-      frameQueue.push(callback);
-      return frameQueue.length;
-    },
-    cancelAnimationFrame(id: number): void {
-      if (id > 0) frameQueue[id - 1] = null;
-    },
-    addEventListener(): void {},
-    removeEventListener(): void {}
-  };
+  globals.window = fakeWindow;
   globals.MutationObserver = class {
     observe(): void {}
     disconnect(): void {}
@@ -234,6 +282,11 @@ export function flushFrames(): void {
   const queue = frameQueue;
   frameQueue = [];
   for (const callback of queue) callback?.();
+}
+
+/** How many animation frames are currently queued but not yet run. */
+export function pendingFrameCount(): number {
+  return frameQueue.filter(Boolean).length;
 }
 
 /** Send a pointer event to the listeners the resizer registered. */
@@ -280,95 +333,4 @@ export function makeApp(view: FakeView | null): App {
       getActiveViewOfType: () => view
     }
   } as unknown as App;
-}
-
-interface MemoryRecord {
-  dimensions: TableDimensions;
-  signature?: string;
-  bodyHash?: string;
-  order?: number;
-}
-
-/** In-memory stand-in for the plugin's data store. */
-export class MemoryStore implements TableStore {
-  readonly tables = new Map<string, MemoryRecord>();
-  flushCount = 0;
-  private dirty = false;
-
-  /** Seed a record the way a previous plugin version would have written it. */
-  seedLegacy(key: string, dimensions: number[]): void {
-    this.tables.set(key, { dimensions: { columns: dimensions, rows: [30] } });
-  }
-
-  seed(key: string, columns: number[], identity: Omit<TableIdentity, "order">): void {
-    this.tables.set(key, { dimensions: { columns, rows: [30] }, ...identity });
-  }
-
-  getEntries(path: string): SavedTableInfo[] {
-    const prefix = `${path}::`;
-    const entries: SavedTableInfo[] = [];
-    for (const [key, record] of this.tables) {
-      if (!key.startsWith(prefix)) continue;
-      entries.push({
-        key,
-        signature: record.signature,
-        bodyHash: record.bodyHash,
-        order: record.order ?? Number.MAX_SAFE_INTEGER
-      });
-    }
-    return entries;
-  }
-
-  getDimensions(key: string): TableDimensions | undefined {
-    return this.tables.get(key)?.dimensions;
-  }
-
-  applyIdentity(key: string, meta: TableIdentity): void {
-    const record = this.tables.get(key);
-    if (!record) return;
-    if (
-      record.signature === meta.signature &&
-      record.bodyHash === meta.bodyHash &&
-      record.order === meta.order
-    ) {
-      return;
-    }
-    record.signature = meta.signature;
-    record.bodyHash = meta.bodyHash;
-    record.order = meta.order;
-    this.dirty = true;
-  }
-
-  saveDimensions(
-    key: string | null,
-    path: string,
-    dimensions: TableDimensions,
-    meta: TableIdentity
-  ): string {
-    const target = key && this.tables.has(key) ? key : this.allocateKey(path);
-    this.tables.set(target, {
-      dimensions: { columns: [...dimensions.columns], rows: [...dimensions.rows] },
-      ...meta
-    });
-    this.dirty = false;
-    return target;
-  }
-
-  removeEntries(path: string): void {
-    for (const key of [...this.tables.keys()]) {
-      if (key.startsWith(`${path}::`)) this.tables.delete(key);
-    }
-  }
-
-  flush(): void {
-    if (!this.dirty) return;
-    this.dirty = false;
-    this.flushCount++;
-  }
-
-  private allocateKey(path: string): string {
-    let slot = 0;
-    while (this.tables.has(`${path}::${slot}`)) slot++;
-    return `${path}::${slot}`;
-  }
 }

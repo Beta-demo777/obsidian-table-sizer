@@ -66,6 +66,8 @@ You can also run **Table Sizer: Reset table sizes for current note** from the co
 - Resizing is applied to the rendered table through a generated `<colgroup>`, with `table-layout: fixed`.
 - Dimensions are persisted in the plugin's `data.json`, under a key scoped to the note.
 - A `MutationObserver` watches the active view so that tables keep their sizes when Obsidian re-renders them.
+- Drag handles are positioned in one batched pass: all geometry is measured first, then all styles are written. Interleaving the two makes the browser recompute layout once per handle, which is enough to freeze the window on a note with a few dozen tables. Tables outside the viewport are skipped without measuring their cells, and scroll events are coalesced into a single animation frame.
+- Identity updates are written at most once per render, and only when something actually changed — document position is only worth tracking for records that have no signature yet.
 
 ### How a table is recognised again
 

@@ -42,6 +42,22 @@ interface TableRecord {
   rowHandles: HTMLElement[];
 }
 
+/** A handle position resolved during the read phase, applied in the write phase. */
+interface HandlePlacement {
+  handle: HTMLElement;
+  visible: boolean;
+  left?: number;
+  top?: number;
+  width?: number;
+  height?: number;
+}
+
+/**
+ * How far outside the viewport a table still gets positioned handles, so they
+ * are already in place by the time the table scrolls into sight.
+ */
+const VIEWPORT_MARGIN = 200;
+
 export class TableResizer {
   private readonly records = new Map<HTMLTableElement, TableRecord>();
   private readonly recordsById = new Map<number, TableRecord>();
@@ -49,6 +65,7 @@ export class TableResizer {
   private activeView: MarkdownView | null = null;
   private resizeSession: ResizeSession | null = null;
   private refreshFrame: number | null = null;
+  private positionFrame: number | null = null;
   private observer: MutationObserver | null = null;
   private readonly workspaceEvents: EventRef[] = [];
   private disposed = false;
@@ -98,6 +115,10 @@ export class TableResizer {
     if (this.refreshFrame !== null) {
       window.cancelAnimationFrame(this.refreshFrame);
       this.refreshFrame = null;
+    }
+    if (this.positionFrame !== null) {
+      window.cancelAnimationFrame(this.positionFrame);
+      this.positionFrame = null;
     }
     this.observer?.disconnect();
     this.observer = null;
@@ -354,36 +375,100 @@ export class TableResizer {
     document.body.classList.remove("table-drag-is-resizing", "table-drag-column", "table-drag-row");
   }
 
+  /**
+   * Scroll and resize fire far more often than the screen refreshes, and each
+   * pass measures every handle, so the work is coalesced into one update per
+   * animation frame.
+   */
   private onViewportChange = (): void => {
-    this.updateHandlePositions();
+    this.scheduleHandlePositionUpdate();
   };
 
+  private scheduleHandlePositionUpdate(): void {
+    if (this.disposed || this.positionFrame !== null) return;
+    this.positionFrame = window.requestAnimationFrame(() => {
+      this.positionFrame = null;
+      if (this.disposed) return;
+      this.updateHandlePositions();
+    });
+  }
+
+  /**
+   * Position every handle in two strictly separated phases.
+   *
+   * Reads and writes used to be interleaved per handle. A style write
+   * invalidates layout, so the `getBoundingClientRect()` that followed forced
+   * the browser to recompute layout for the whole document — thousands of
+   * forced synchronous layouts for a single scroll event on a note with a few
+   * dozen tables, which froze the window. Measuring everything first and only
+   * then writing costs one layout per pass.
+   *
+   * Tables outside the viewport are skipped without measuring a single cell or
+   * row: their handles are hidden and left alone.
+   */
   private updateHandlePositions(): void {
+    // Read once, before any write: querying the viewport mid-pass could itself
+    // flush pending layout.
+    const viewportHeight = window.innerHeight || 0;
+    const viewportTop = -VIEWPORT_MARGIN;
+    const viewportBottom = viewportHeight + VIEWPORT_MARGIN;
+    const placements: HandlePlacement[] = [];
+
     for (const record of this.records.values()) {
       const tableRect = record.table.getBoundingClientRect();
-      const visible = tableRect.width > 0 && tableRect.height > 0;
-      [...record.columnHandles, ...record.rowHandles].forEach((handle) => {
-        handle.style.display = visible ? "block" : "none";
-      });
-      if (!visible) continue;
+      const visible =
+        tableRect.width > 0 &&
+        tableRect.height > 0 &&
+        tableRect.bottom >= viewportTop &&
+        tableRect.top <= viewportBottom;
 
+      if (!visible) {
+        for (const handle of record.columnHandles) placements.push({ handle, visible: false });
+        for (const handle of record.rowHandles) placements.push({ handle, visible: false });
+        continue;
+      }
+
+      const headerRow = record.table.rows[0];
       record.columnHandles.forEach((handle, index) => {
-        const cell = record.table.rows[0]?.cells[index];
-        if (!cell) return;
-        const rect = cell.getBoundingClientRect();
-        handle.style.left = `${rect.right}px`;
-        handle.style.top = `${tableRect.top}px`;
-        handle.style.height = `${tableRect.height}px`;
+        const cell = headerRow?.cells[index];
+        if (!cell) {
+          placements.push({ handle, visible: false });
+          return;
+        }
+        placements.push({
+          handle,
+          visible: true,
+          left: cell.getBoundingClientRect().right,
+          top: tableRect.top,
+          height: tableRect.height
+        });
       });
 
       record.rowHandles.forEach((handle, index) => {
         const row = record.table.rows[index];
-        if (!row) return;
-        const rect = row.getBoundingClientRect();
-        handle.style.left = `${tableRect.left}px`;
-        handle.style.top = `${rect.bottom}px`;
-        handle.style.width = `${tableRect.width}px`;
+        if (!row) {
+          placements.push({ handle, visible: false });
+          return;
+        }
+        placements.push({
+          handle,
+          visible: true,
+          left: tableRect.left,
+          top: row.getBoundingClientRect().bottom,
+          width: tableRect.width
+        });
       });
+    }
+
+    // Write phase: no reads past this point, so no layout is forced again.
+    for (const placement of placements) {
+      const { handle } = placement;
+      handle.style.display = placement.visible ? "block" : "none";
+      if (!placement.visible) continue;
+      if (placement.left !== undefined) handle.style.left = `${placement.left}px`;
+      if (placement.top !== undefined) handle.style.top = `${placement.top}px`;
+      if (placement.width !== undefined) handle.style.width = `${placement.width}px`;
+      if (placement.height !== undefined) handle.style.height = `${placement.height}px`;
     }
   }
 

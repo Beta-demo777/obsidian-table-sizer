@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import { TableResizer } from "../src/table-resizer";
 import { DEFAULT_SETTINGS } from "../src/types";
+import { TestTableStore } from "./helpers/test-store";
 import {
   appliedWidths,
   dispatchPointer,
@@ -13,7 +14,6 @@ import {
   makeApp,
   makeTable,
   makeView,
-  MemoryStore,
   type FakeTable
 } from "./helpers/fake-dom";
 
@@ -36,7 +36,7 @@ const WIDTHS_C = [666, 777];
 /** The view's table list is mutated in place, mirroring a re-render. */
 const viewTables: FakeTable[] = [];
 
-function createResizer(store: MemoryStore): TableResizer {
+function createResizer(store: TestTableStore): TableResizer {
   const resizer = new TableResizer(
     makeApp(makeView(PATH, viewTables)),
     { ...DEFAULT_SETTINGS },
@@ -59,8 +59,8 @@ function render(
 }
 
 /** Records from a version of the plugin that only stored positions. */
-function legacyStore(): MemoryStore {
-  const store = new MemoryStore();
+function legacyStore(): TestTableStore {
+  const store = new TestTableStore();
   store.seedLegacy(`${PATH}::0`, WIDTHS_A);
   store.seedLegacy(`${PATH}::1`, WIDTHS_B);
   store.seedLegacy(`${PATH}::2`, WIDTHS_C);
@@ -95,10 +95,10 @@ test("legacy records are applied in place and taught their signatures", () => {
   assert.deepEqual(appliedWidths(c), WIDTHS_C);
 
   for (const key of [`${PATH}::0`, `${PATH}::1`, `${PATH}::2`]) {
-    assert.ok(store.tables.get(key)?.signature, `${key} should have learned a signature`);
+    assert.ok(store.tables[key]?.signature, `${key} should have learned a signature`);
   }
   // One coalesced write for the whole render, not one per table.
-  assert.equal(store.flushCount, 1);
+  assert.equal(store.writes, 1);
 });
 
 test("a plain reopen after the upgrade changes nothing", () => {
@@ -109,7 +109,7 @@ test("a plain reopen after the upgrade changes nothing", () => {
     { headers: HEADERS_B, body: BODY_B },
     { headers: HEADERS_C, body: BODY_C }
   ]);
-  const writesAfterUpgrade = store.flushCount;
+  const writesAfterUpgrade = store.writes;
 
   const [a, b, c] = render(resizer, [
     { headers: HEADERS_A, body: BODY_A },
@@ -120,7 +120,7 @@ test("a plain reopen after the upgrade changes nothing", () => {
   assert.deepEqual(appliedWidths(a), WIDTHS_A);
   assert.deepEqual(appliedWidths(b), WIDTHS_B);
   assert.deepEqual(appliedWidths(c), WIDTHS_C);
-  assert.equal(store.flushCount, writesAfterUpgrade, "no further writes once identities are known");
+  assert.equal(store.writes, writesAfterUpgrade, "no further writes once identities are known");
 });
 
 // ---------------------------------------------------------------------------
@@ -147,7 +147,7 @@ test("inserting a table at the top leaves every other table untouched", () => {
   assert.deepEqual(appliedWidths(b), WIDTHS_B, "second original table must keep its widths");
   assert.deepEqual(appliedWidths(c), WIDTHS_C, "third original table must keep its widths");
   assert.equal(appliedWidths(newcomer), null, "the new table inherits nothing");
-  assert.equal(store.tables.size, 3, "no extra record was created for the new table");
+  assert.equal(store.recordCount(), 3, "no extra record was created for the new table");
 });
 
 test("inserting a table with the same shape as an existing one is still safe", () => {
@@ -255,7 +255,7 @@ test("a wholesale rewrite does not inherit another table's sizes", () => {
 // ---------------------------------------------------------------------------
 
 test("documented limit: inserting before the upgrade resolves is ambiguous", () => {
-  const store = new MemoryStore();
+  const store = new TestTableStore();
   store.seedLegacy(`${PATH}::0`, WIDTHS_A);
 
   const resizer = createResizer(store);
@@ -269,14 +269,14 @@ test("documented limit: inserting before the upgrade resolves is ambiguous", () 
   assert.deepEqual(appliedWidths(newcomer), [111]);
   assert.equal(appliedWidths(old), null);
   assert.equal(
-    store.tables.get(`${PATH}::0`)?.signature,
+    store.tables[`${PATH}::0`]?.signature,
     undefined,
     "a positional guess must not be recorded as identity"
   );
 });
 
 test("records for other notes are never matched", () => {
-  const store = new MemoryStore();
+  const store = new TestTableStore();
   store.seedLegacy("other.md::0", WIDTHS_A);
 
   const resizer = createResizer(store);
@@ -314,12 +314,12 @@ test("dragging a new table stores a fresh record with its identity", () => {
 
   assert.deepEqual(appliedWidths(newcomer), [140], "100px measured + 40px dragged");
 
-  const created = [...store.tables.entries()].filter(([key]) => key.startsWith(`${PATH}::`));
+  const created = Object.entries(store.tables).filter(([key]) => key.startsWith(`${PATH}::`));
   assert.equal(created.length, 4, "a record was created for the new table");
   const added = created.find(([key]) => !["0", "1", "2"].includes(key.split("::")[1]));
   assert.ok(added, "the new record uses a fresh key");
   assert.ok(added[1].signature, "the new record stores its identity");
-  assert.deepEqual(added[1].dimensions.columns, [140]);
+  assert.deepEqual(added[1].columns, [140]);
 });
 
 test("resetting the note clears its records and its sizes", () => {
@@ -340,8 +340,61 @@ test("resetting the note clears its records and its sizes", () => {
     { headers: HEADERS_C, body: BODY_C }
   ]);
 
-  assert.equal(store.tables.size, 0);
+  assert.equal(store.recordCount(), 0);
   assert.equal(appliedWidths(a), null);
   assert.equal(appliedWidths(b), null);
   assert.equal(appliedWidths(c), null);
+});
+
+// ---------------------------------------------------------------------------
+// Write frequency
+// ---------------------------------------------------------------------------
+
+test("re-rendering with a different visible set stops writing once identities are known", () => {
+  const store = legacyStore();
+  const resizer = createResizer(store);
+  render(resizer, [
+    { headers: HEADERS_A, body: BODY_A },
+    { headers: HEADERS_B, body: BODY_B },
+    { headers: HEADERS_C, body: BODY_C }
+  ]);
+  const writesAfterUpgrade = store.writes;
+
+  // Live Preview re-renders as tables scroll in and out, so the index of every
+  // remaining table changes. That must not be treated as new information.
+  const all = [
+    { headers: HEADERS_A, body: BODY_A },
+    { headers: HEADERS_B, body: BODY_B },
+    { headers: HEADERS_C, body: BODY_C }
+  ];
+  const scrolled = [
+    { headers: HEADERS_B, body: BODY_B },
+    { headers: HEADERS_C, body: BODY_C }
+  ];
+
+  for (let i = 0; i < 20; i++) {
+    render(resizer, i % 2 === 0 ? scrolled : all);
+  }
+
+  assert.equal(
+    store.writes,
+    writesAfterUpgrade,
+    "a scroll-driven re-render must not write to disk"
+  );
+});
+
+test("a record without a signature keeps tracking its position", () => {
+  const store = new TestTableStore();
+  store.seedLegacy(`${PATH}::0`, WIDTHS_A);
+  const resizer = createResizer(store);
+
+  // A second table appears, so the counts differ and the positional record is
+  // deliberately not taught an identity — its position stays the only signal.
+  render(resizer, [
+    { headers: ["备注"], body: [["随手记"]] },
+    { headers: HEADERS_A, body: BODY_A }
+  ]);
+
+  assert.deepEqual(store.getEntries(PATH)[0]?.order, 0);
+  assert.equal(store.tables[`${PATH}::0`]?.signature, undefined);
 });
