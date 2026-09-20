@@ -16,6 +16,11 @@ Unlike Markdown table editors that rewrite the table source, Table Sizer is pure
 - **Configurable minimums** — set a floor for column width and row height.
 - **Reset command** — clear the saved sizes for the current note from the command palette or the settings tab.
 
+## Requirements
+
+- Obsidian 1.6.0 or later.
+- **Desktop only.** Resizing depends on precise pointer dragging, so the plugin is not available on Obsidian Mobile.
+
 ## Installation
 
 ### From the Community plugins directory
@@ -93,6 +98,8 @@ To test locally, place the repository in `<your-vault>/.obsidian/plugins/table-s
 一个由 Beta777 编写的 Obsidian 插件，为 Markdown 表格添加拖拽调整列宽和行高的能力。
 
 与那些会改写表格源码的编辑器不同，本插件是纯视觉方案：调整发生在渲染后的表格上，尺寸按笔记保存在插件自己的数据文件中，**不会修改你的 Markdown 原文**。
+
+> **仅支持桌面端。** 拖拽依赖精确的指针操作，插件不在 Obsidian 移动端提供。
 
 ### 特性
 

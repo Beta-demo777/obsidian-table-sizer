@@ -6,5 +6,5 @@
   "description": "Drag Markdown table borders to resize columns and rows.",
   "author": "Beta777",
   "authorUrl": "https://github.com/Beta-demo777",
-  "isDesktopOnly": false
+  "isDesktopOnly": true
 }

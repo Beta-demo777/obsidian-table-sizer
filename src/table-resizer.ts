@@ -1,4 +1,4 @@
-import { MarkdownView, type App } from "obsidian";
+import { MarkdownView, type App, type EventRef } from "obsidian";
 import type { TableDimensions, TableDragSettings } from "./types";
 
 type ResizeMode = "column" | "row";
@@ -28,6 +28,8 @@ export class TableResizer {
   private resizeSession: ResizeSession | null = null;
   private refreshFrame: number | null = null;
   private observer: MutationObserver | null = null;
+  private readonly workspaceEvents: EventRef[] = [];
+  private disposed = false;
 
   constructor(
     private readonly app: App,
@@ -38,9 +40,18 @@ export class TableResizer {
   ) {}
 
   load(): void {
+    this.disposed = false;
+
+    // onLayoutReady is one-shot and cannot be unregistered, so the disposed
+    // flag is what stops a late callback from rebuilding handles after unload.
     this.app.workspace.onLayoutReady(() => this.refresh());
-    this.app.workspace.on("active-leaf-change", () => this.refresh());
-    this.app.workspace.on("layout-change", () => this.refresh());
+
+    // These handlers outlive the plugin unless explicitly released, and a
+    // leaked one would resurrect handles on an already unloaded instance.
+    this.workspaceEvents.push(
+      this.app.workspace.on("active-leaf-change", () => this.refresh()),
+      this.app.workspace.on("layout-change", () => this.refresh())
+    );
 
     document.addEventListener("pointerdown", this.onPointerDown, true);
     document.addEventListener("pointermove", this.onPointerMove, true);
@@ -51,22 +62,35 @@ export class TableResizer {
   }
 
   unload(): void {
+    this.disposed = true;
+
     document.removeEventListener("pointerdown", this.onPointerDown, true);
     document.removeEventListener("pointermove", this.onPointerMove, true);
     document.removeEventListener("pointerup", this.onPointerUp, true);
     document.removeEventListener("pointercancel", this.onPointerUp, true);
     window.removeEventListener("resize", this.onViewportChange, true);
     window.removeEventListener("scroll", this.onViewportChange, true);
-    if (this.refreshFrame !== null) window.cancelAnimationFrame(this.refreshFrame);
+
+    for (const ref of this.workspaceEvents) this.app.workspace.offref(ref);
+    this.workspaceEvents.length = 0;
+
+    if (this.refreshFrame !== null) {
+      window.cancelAnimationFrame(this.refreshFrame);
+      this.refreshFrame = null;
+    }
     this.observer?.disconnect();
     this.observer = null;
+    // Unloading mid-drag must not leave the global body state behind.
+    this.clearResizeState();
     this.clearRecords();
+    this.activeView = null;
   }
 
   refresh(): void {
-    if (this.refreshFrame !== null) return;
+    if (this.disposed || this.refreshFrame !== null) return;
     this.refreshFrame = window.requestAnimationFrame(() => {
       this.refreshFrame = null;
+      if (this.disposed) return;
       this.refreshNow();
     });
   }
@@ -84,6 +108,8 @@ export class TableResizer {
   }
 
   private refreshNow(): void {
+    if (this.disposed) return;
+
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (!view?.file) {
       this.activeView = null;
@@ -232,10 +258,14 @@ export class TableResizer {
 
     const record = this.records.get(session.table);
     if (record) this.setDimensions(session.tableKey, record.dimensions);
+    this.clearResizeState();
+  };
+
+  private clearResizeState(): void {
+    this.resizeSession = null;
     for (const handle of this.handles) handle.classList.remove("is-dragging");
     document.body.classList.remove("table-drag-is-resizing", "table-drag-column", "table-drag-row");
-    this.resizeSession = null;
-  };
+  }
 
   private onViewportChange = (): void => {
     this.updateHandlePositions();
