@@ -66,6 +66,17 @@ export class FakeElement {
     this.attributes[name] = value;
   }
 
+  /** Supports the selectors used by production code, e.g. ".a, .b" or "table". */
+  closest(selector: string): FakeElement | null {
+    const parts = parseSelector(selector);
+    let node: FakeElement | null = this;
+    while (node) {
+      if (parts.some((part) => matchesSelector(node as FakeElement, part))) return node;
+      node = node.parentNode;
+    }
+    return null;
+  }
+
   remove(): void {
     const parent = this.parentNode as unknown as { children?: FakeElement[] } | null;
     if (parent && Array.isArray(parent.children)) {
@@ -73,6 +84,65 @@ export class FakeElement {
       if (index >= 0) parent.children.splice(index, 1);
     }
     this.parentNode = null;
+  }
+}
+
+interface ParsedSelector {
+  classes: string[];
+  tag: string | null;
+}
+
+function parseSelector(selector: string): ParsedSelector[] {
+  return selector
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) =>
+      part.startsWith(".")
+        ? { classes: [part.slice(1)], tag: null }
+        : { classes: [], tag: part.toLowerCase() }
+    );
+}
+
+function matchesSelector(element: FakeElement, part: ParsedSelector): boolean {
+  if (part.tag && (element as unknown as { tagName?: string }).tagName !== part.tag) return false;
+  return part.classes.every((name) => element.classList.contains(name));
+}
+
+/** A plain container, used to model Obsidian's nesting inside a view. */
+export class FakeContainer extends FakeElement {
+  children: FakeElement[] = [];
+
+  appendChild(child: FakeElement): FakeElement {
+    child.parentNode = this;
+    this.children.push(child);
+    return child;
+  }
+
+  insertBefore(node: FakeElement, reference: FakeElement | null): FakeElement {
+    const index = reference ? this.children.indexOf(reference) : 0;
+    this.children.splice(index < 0 ? 0 : index, 0, node);
+    node.parentNode = this;
+    return node;
+  }
+
+  /** Depth-first search, enough for the selectors the tests use. */
+  querySelectorAll(selector: string): FakeElement[] {
+    const parts = parseSelector(selector);
+    const found: FakeElement[] = [];
+    const walk = (parent: FakeElement): void => {
+      const children = (parent as unknown as { children?: FakeElement[] }).children;
+      if (!Array.isArray(children)) return;
+      for (const child of children) {
+        // Keep parentNode honest even for children injected directly into the
+        // array, so `closest()` behaves like it does in a browser.
+        if (!child.parentNode) child.parentNode = parent;
+        if (parts.some((part) => matchesSelector(child, part))) found.push(child);
+        walk(child);
+      }
+    };
+    walk(this);
+    return found;
   }
 }
 
@@ -123,6 +193,7 @@ class FakeRow extends FakeElement {
 }
 
 export class FakeTable extends FakeElement {
+  readonly tagName = "table";
   children: FakeElement[] = [];
 
   constructor(
@@ -267,6 +338,7 @@ export function dispatchWindowEvent(type: string): number {
 
 export function installFakeDom(): void {
   const globals = globalThis as unknown as Record<string, unknown>;
+  globals.Element = FakeElement;
   globals.HTMLElement = FakeElement;
   globals.HTMLTableColElement = FakeColElement;
   globals.document = fakeDocument;
@@ -310,14 +382,34 @@ export function dispatchPointer(
 
 export interface FakeView {
   file: { path: string };
-  contentEl: { querySelectorAll(selector: string): FakeTable[] };
+  contentEl: FakeContainer;
+  /** Where Obsidian renders the note; tables under it are note tables. */
+  noteContent: FakeContainer;
+  /** Mount another plugin's UI inside the view, the way Editing Toolbar does. */
+  addForeignHost(classes: string[]): FakeContainer;
 }
 
 export function makeView(path: string, tables: FakeTable[]): FakeView {
+  const noteContent = new FakeContainer();
+  noteContent.classList.add("cm-content");
+
+  const contentEl = new FakeContainer();
+  contentEl.classList.add("view-content");
+
+  // The note host shares the caller's array, which tests mutate in place to
+  // simulate a re-render.
+  noteContent.children = tables as unknown as FakeElement[];
+  contentEl.appendChild(noteContent);
+
   return {
     file: { path },
-    contentEl: {
-      querySelectorAll: (selector: string) => (selector === "table" ? tables : [])
+    contentEl,
+    noteContent,
+    addForeignHost(classes: string[]): FakeContainer {
+      const host = new FakeContainer();
+      classes.forEach((name) => host.classList.add(name));
+      contentEl.appendChild(host);
+      return host;
     }
   };
 }

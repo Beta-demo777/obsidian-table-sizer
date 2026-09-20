@@ -58,6 +58,22 @@ interface HandlePlacement {
  */
 const VIEWPORT_MARGIN = 200;
 
+/**
+ * Where Obsidian renders a note's Markdown.
+ *
+ * Everything else inside a view belongs to another plugin. Editing Toolbar, for
+ * one, mounts its toolbar inside `.markdown-source-view` — a sibling of
+ * `.cm-content` — and that toolbar contains real `<table>` elements for its
+ * colour pickers. Treating those as note tables sprouted drag handles over the
+ * toolbar and rewrote the pickers' layout with a colgroup and `table-layout:
+ * fixed`.
+ */
+const NOTE_CONTENT_SELECTOR = ".markdown-preview-sizer, .cm-content";
+
+function isNoteContent(node: Element): boolean {
+  return node.closest(NOTE_CONTENT_SELECTOR) !== null;
+}
+
 export class TableResizer {
   private readonly records = new Map<HTMLTableElement, TableRecord>();
   private readonly recordsById = new Map<number, TableRecord>();
@@ -173,6 +189,9 @@ export class TableResizer {
     this.clearRecords();
     const path = view.file.path;
     const tables = (Array.from(view.contentEl.querySelectorAll("table")) as HTMLTableElement[])
+      // Only tables Obsidian rendered from the note. Other plugins mount their
+      // own UI — including real tables — inside the view.
+      .filter((table) => isNoteContent(table))
       .filter((table) => {
         const rect = table.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
@@ -215,6 +234,10 @@ export class TableResizer {
     return mutations.some((mutation) => {
       if (mutation.type !== "childList") return false;
       if (mutation.target instanceof HTMLTableColElement) return false;
+      // Changes outside the note's rendered content are another plugin's UI
+      // updating itself — a toolbar that follows the cursor, for instance — and
+      // say nothing about the tables this plugin manages.
+      if (mutation.target instanceof Element && !isNoteContent(mutation.target)) return false;
 
       const changedNodes = [...Array.from(mutation.addedNodes), ...Array.from(mutation.removedNodes)];
       return changedNodes.some((node) => !(node instanceof HTMLTableColElement));
